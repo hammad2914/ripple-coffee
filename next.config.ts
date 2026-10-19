@@ -1,7 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
   cacheComponents: true,
   partialPrefetching: true,
   turbopack: {
@@ -11,6 +10,11 @@ const nextConfig: NextConfig = {
         as: "*.css",
       },
     },
+  },
+  images: {
+    // Unsplash serves its own resized, compressed variants, so we let it do the work.
+    loader: "custom",
+    loaderFile: "./src/lib/unsplash-loader.ts",
   },
 };
 
