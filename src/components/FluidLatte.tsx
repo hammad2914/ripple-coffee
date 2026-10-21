@@ -16,6 +16,11 @@ export type LatteTheme = {
 };
 export type FluidLatteHandle = { pour: () => void };
 
+const smooth01 = (x: number) => {
+  const t = Math.min(1, Math.max(0, x));
+  return t * t * (3 - 2 * t);
+};
+
 const VEL_RES = 128;
 const DYE_RES = 512;
 
@@ -199,6 +204,13 @@ uniform float uIntro;
 uniform vec3 uCeramic;
 uniform float uShadow;
 uniform vec4 uTable;   // rgb + 1 when opaque, 0 when transparent
+uniform float uFill;   // espresso poured so far: 0 empty cup → 1 full
+uniform float uCrema;  // 0 fresh black espresso → 1 settled crema
+uniform vec2 uEspressoAt; // where the espresso stream lands
+uniform float uStream; // stream seen from above: strength, landing point, colour, width
+uniform vec2 uStreamAt;
+uniform vec3 uStreamCol;
+uniform float uStreamW;
 
 float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 float noise(vec2 p) {
@@ -269,6 +281,20 @@ void main() {
   }
 
   float liq = 1.0 - smoothstep(1.0 - px * 1.5, 1.0, r);
+  // Empty cup interior: a flat bottom in the middle, the inside wall rising to the lip, lit from the window side
+  if (liq > 0.0 && uFill < 1.0) {
+    float wallT = smoothstep(0.58, 1.0, r);
+    vec3 ic = glaze(0.8 + 0.18 * dot(-dir, L) * wallT + 0.05 * (1.0 - wallT));
+    ic *= 1.0 - 0.07 * exp(-pow((r - 0.58) / 0.05, 2.0));
+    over(ic, liq);
+  }
+  // Espresso spreads out from where the stream lands, then rises up the tapered wall
+  float de = length(p - uEspressoAt);
+  float wobE = (fbm(p * 4.0 + uTime * 0.25) - 0.5) * 0.2;
+  float reach = uFill * 2.6 + wobE;
+  float level = mix(0.58, 1.0, smoothstep(0.12, 1.0, uFill)) + wobE * 0.08;
+  float cov = uFill >= 1.0 ? 1.0 : smoothstep(reach, reach - 0.03, de) * smoothstep(level + 0.012, level - 0.012, r);
+  liq *= cov;
   if (liq > 0.0) {
     vec2 suv = p * 0.485 + 0.5;
     vec2 tx = vec2(1.5 / ${DYE_RES}.0);
@@ -280,6 +306,14 @@ void main() {
     float speck = fbm(p * 9.0 + 3.0);
     vec3 coffee = mix(vec3(0.53, 0.30, 0.15), vec3(0.27, 0.13, 0.06), smoothstep(0.1, 1.0, r));
     coffee *= 0.9 + 0.2 * speck;
+    // Fresh espresso is near black; the crema blooms outward from the stream as it settles, tiger-striped at first
+    float bloom = smoothstep(uCrema * 2.4, uCrema * 2.4 - 0.5, de) * uCrema;
+    float tiger = fbm(vec2(atan(p.y - uEspressoAt.y, p.x - uEspressoAt.x) * 3.0, de * 7.0 - uTime * 0.3));
+    vec3 black = vec3(0.13, 0.06, 0.03) * (0.85 + 0.3 * speck);
+    coffee = mix(black, coffee * (1.0 + (tiger - 0.5) * 0.5 * (1.0 - uCrema)), bloom);
+    // At the shallow leading edge the white cup glows through, amber
+    float edge = smoothstep(reach - 0.03, reach - 0.22, de);
+    coffee = mix(vec3(0.55, 0.32, 0.16), coffee, uFill >= 1.0 ? 1.0 : 0.35 + 0.65 * edge);
     coffee = mix(coffee, vec3(0.62, 0.42, 0.26), mixed * 0.7);
 
     // Foam with a brown halo where it thins out, and microfoam grain
@@ -303,7 +337,21 @@ void main() {
     float men = smoothstep(0.955, 0.99, r) * (1.0 - smoothstep(0.99, 1.0, r));
     lc += vec3(0.22, 0.16, 0.1) * men * (0.5 + 0.5 * dot(-dir, L));
     lc *= 1.0 - 0.25 * smoothstep(0.82, 1.0, r) * max(dot(dir, L), 0.0);
+    // Rings running out from the stream while it pours
+    float ds = length(p - uStreamAt);
+    lc *= 1.0 + 0.09 * uStream * sin(ds * 70.0 - uTime * 16.0) * exp(-ds * 6.0);
     over(lc, liq);
+  }
+
+  // The stream itself, seen from straight above: a glossy round column with its shadow falling down-right
+  if (uStream > 0.0) {
+    float ds = length(p - uStreamAt);
+    over(sh, 0.3 * uStream * (1.0 - smoothstep(uStreamW * 0.6, uStreamW * 2.2, length(p - uStreamAt - vec2(0.06, -0.08)))));
+    float core = 1.0 - smoothstep(uStreamW - px * 1.5, uStreamW, ds);
+    vec2 sp = (p - uStreamAt) / uStreamW;
+    vec3 sc = uStreamCol * (0.8 + 0.3 * (1.0 - dot(sp, sp)));
+    sc += vec3(1.0) * pow(1.0 - smoothstep(0.0, 0.45, length(sp - vec2(-0.35, 0.35))), 2.0) * 0.35;
+    over(sc, core * uStream);
   }
 
   o = vec4(col, alpha) * uIntro;
@@ -537,16 +585,55 @@ const FluidLatte = forwardRef<FluidLatteHandle, { theme: LatteTheme; intro?: Rea
         blit(dye.write);
         dye.swap();
       };
+      // Milk stream position in cup coordinates: wiggle in the middle while the heart grows,
+      // then lift and pull through to the tip. The heart frame is the cup frame turned by 0.42 rad.
+      const HEART_TURN = 0.42;
+      const fromHeart = (x: number, y: number) => {
+        const c = Math.cos(HEART_TURN), s = Math.sin(HEART_TURN);
+        return [c * x - s * y, s * x + c * y] as const;
+      };
+      const milkStream = (t: number) => {
+        if (t < 0 || t > 1.75) return null;
+        if (t < 1.2) return { at: fromHeart(Math.sin(t * 13) * 0.035, 0.1), a: Math.min(1, t / 0.12), w: 0.05 };
+        if (t < 1.3) {
+          const f = (t - 1.2) / 0.1;
+          return { at: fromHeart(0, 0.1 + 0.3 * f), a: 1 - 0.45 * f, w: 0.05 - 0.02 * f };
+        }
+        const f = Math.min(1, (t - 1.3) / 0.4);
+        return { at: fromHeart(0, 0.4 - 0.95 * f), a: 0.55 * (1 - smooth01((t - 1.6) / 0.15)), w: 0.03 };
+      };
       // The pour: foam spreads out from the stream while the surface keeps moving under it.
       const pourAt = (t: number) => {
         if (t > POUR) return;
         stamp(Math.min(1, t / (POUR * 0.8)));
+        // Pulling through drags the surface along behind the stream
+        if (t > 1.3 && t < 1.7) {
+          const [x, y] = fromHeart(0, 0.4 - 0.95 * ((t - 1.3) / 0.4));
+          const [vx, vy] = fromHeart(0, -1);
+          splat(x * 0.485 + 0.5, y * 0.485 + 0.5, vx * 260, vy * 260, 0, 0.0012);
+        }
+      };
 
-      };
-  pourFn.current = () => {
+      // Espresso first, crema blooms, then the milk. Each replay starts from an empty cup.
+      const ESPRESSO_AT = [0.16, 0.22] as const;
+      const seq = { fill: 0, crema: 0, stream: 0 };
+      let tl: gsap.core.Timeline | null = null;
+      const play = (delay: number) => {
+        tl?.kill();
         clearAll();
-        pourT = 0;
+        pourT = -1;
+        seq.fill = seq.crema = seq.stream = 0;
+        tl = gsap
+          .timeline({ delay })
+          .to(seq, { stream: 1, duration: 0.25, ease: "power1.out" }, 0)
+          .to(seq, { fill: 1, duration: 2.6, ease: "sine.inOut" }, 0.1)
+          .to(seq, { crema: 1, duration: 2.6, ease: "power1.inOut" }, 0.8)
+          .to(seq, { stream: 0, duration: 0.3, ease: "power1.in" }, 2.45)
+          .add(() => {
+            pourT = 0;
+          }, 3.1);
       };
+      pourFn.current = () => play(0.45);
 
       // Pointer stirring: velocity only, the foam moves with the coffee.
       let w = 0, h = 0, dpr = 1;
@@ -592,9 +679,10 @@ const FluidLatte = forwardRef<FluidLatteHandle, { theme: LatteTheme; intro?: Rea
       let acc = 0;
       let lastTime = performance.now();
       const start = lastTime;
-      if (!reduce) pourT = 0;
+      if (!reduce) play(0.7);
       else {
-        // Reduced motion: run the pour instantly so the heart is there, then stay still.
+        // Reduced motion: a full cup with the heart already there, then stay still.
+        seq.fill = seq.crema = 1;
         for (let t = 0; t < POUR; t += STEP) {
           pourAt(t);
           step(STEP);
@@ -643,12 +731,28 @@ const FluidLatte = forwardRef<FluidLatteHandle, { theme: LatteTheme; intro?: Rea
         gl.uniform1f(P.display.u("uShadow"), theme.shadow);
         if (theme.table === "transparent") gl.uniform4f(P.display.u("uTable"), 0, 0, 0, 0);
         else gl.uniform4f(P.display.u("uTable"), ...theme.table, 1);
+        gl.uniform1f(P.display.u("uFill"), seq.fill);
+        gl.uniform1f(P.display.u("uCrema"), seq.crema);
+        gl.uniform2f(P.display.u("uEspressoAt"), ...ESPRESSO_AT);
+        const milk = milkStream(pourT);
+        if (milk) {
+          gl.uniform1f(P.display.u("uStream"), milk.a);
+          gl.uniform2f(P.display.u("uStreamAt"), ...milk.at);
+          gl.uniform3f(P.display.u("uStreamCol"), 0.97, 0.95, 0.91);
+          gl.uniform1f(P.display.u("uStreamW"), milk.w);
+        } else {
+          gl.uniform1f(P.display.u("uStream"), seq.stream);
+          gl.uniform2f(P.display.u("uStreamAt"), ...ESPRESSO_AT);
+          gl.uniform3f(P.display.u("uStreamCol"), 0.2, 0.09, 0.04);
+          gl.uniform1f(P.display.u("uStreamW"), 0.05);
+        }
         blit(null);
       };
       gsap.ticker.add(frame);
 
       return () => {
         gsap.ticker.remove(frame);
+        tl?.kill();
         ro.disconnect();
         io.disconnect();
         canvas.removeEventListener("pointermove", onMove);

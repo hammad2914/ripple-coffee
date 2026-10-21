@@ -120,15 +120,36 @@ function contactShadow() {
   return tex;
 }
 
-type LiquidState = { h: number[]; colors: string[]; foam: boolean[]; names: string[]; ml: number[]; ice: number; labels: number; vessel: "double" | "highball"; swap: number };
+type LiquidState = {
+  h: number[]; colors: string[]; foam: boolean[]; names: string[]; ml: number[]; ice: number; labels: number; vessel: "double" | "highball"; swap: number;
+  // The stream: its front falls from above (head 0→1), its tail follows it down when the pour ends (tail 0→1)
+  head: number; tail: number; pourColor: string; pourFoam: boolean;
+};
 
-export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1E1E" }: { recipe: Recipe; background?: string; accent?: string }) {
+const STREAM_TOP = 19; // above the top of the frame
+
+/** `replay`: bump it to pour the same recipe again from empty. */
+export default function Glass3D({
+  recipe,
+  replay = 0,
+  side = "right",
+  background = "#F3EEE5",
+  accent = "#6E1E1E",
+}: {
+  recipe: Recipe;
+  replay?: number;
+  side?: "left" | "right";
+  background?: string;
+  accent?: string;
+}) {
   const wrap = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLDivElement>(null);
-  const api = useRef<{ setRecipe: (r: Recipe) => void } | null>(null);
+  const api = useRef<{ setRecipe: (r: Recipe, fromEmpty?: boolean) => void } | null>(null);
   const latest = useRef(recipe);
   const mounted = useRef(false);
+  const lastReplay = useRef(replay);
+  const sideRef = useRef(side);
 
   useEffect(() => {
     const canvas = canvasRef.current!;
@@ -176,6 +197,14 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
     shadow.position.y = 0.01;
     scene.add(shadow);
 
+    // The pour: a slightly tapered column from above the frame down to the surface, a little off-centre like a jug's
+    const streamGeo = new THREE.CylinderGeometry(1, 0.78, 1, 24, 1, true);
+    streamGeo.translate(0, -0.5, 0);
+    const streamMat = new THREE.MeshPhysicalMaterial({ color: 0x3a1a0c, roughness: 0.12, clearcoat: 0.7, envMapIntensity: 1.1 });
+    const stream = new THREE.Mesh(streamGeo, streamMat);
+    stream.visible = false;
+    let streamHex = "";
+
     // Liquid layers (rebuilt as their heights change) and ice
     const layerMeshes: THREE.Mesh[] = [];
     const liquidMat = (hex: string, foam: boolean, clear: boolean) =>
@@ -200,7 +229,11 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
     });
     const iceSlots = [[-0.9, 0.4], [0.8, 0.6], [0.1, -0.9], [-0.4, 0.9], [0.9, -0.5]];
 
-    const state: LiquidState = { h: [0, 0, 0, 0, 0], colors: [], foam: [], names: [], ml: [0, 0, 0, 0, 0], ice: 0, labels: 0, vessel: recipe.ice ? "highball" : "double", swap: 1 };
+    const state: LiquidState = {
+      h: [0, 0, 0, 0, 0], colors: [], foam: [], names: [], ml: [0, 0, 0, 0, 0], ice: 0, labels: 0, vessel: recipe.ice ? "highball" : "double", swap: 1,
+      head: 0, tail: 0, pourColor: "#3a1a0c", pourFoam: false,
+    };
+    group.add(stream);
     let builtKey = "";
 
     const rebuild = () => {
@@ -229,7 +262,7 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
     const labelEls = Array.from({ length: 5 }, () => {
       const el = document.createElement("div");
       el.className = "pointer-events-none absolute left-0 top-0 flex items-center gap-0 will-change-transform";
-      el.innerHTML = `<span class="block size-[5px] rounded-full" style="background:${accent}"></span><span class="block h-px w-[var(--len)]" style="background:${accent};opacity:.55"></span><span class="ml-3 leading-tight"><span class="block text-[11px] uppercase tracking-[0.14em] text-ink/70" data-n></span><span class="block font-display text-[19px] font-medium" style="color:${accent}" data-ml></span></span>`;
+      el.innerHTML = `<span class="block size-[5px] rounded-full" style="background:${accent}"></span><span class="block h-px w-[var(--len)]" style="background:${accent};opacity:.55"></span><span class="leading-tight"><span class="block text-[11px] uppercase tracking-[0.14em] text-ink/70" data-n></span><span class="block font-display text-[19px] font-medium" style="color:${accent}" data-ml></span></span>`;
       overlay.current!.appendChild(el);
       return el;
     });
@@ -269,6 +302,7 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
       return { x: (tmp.x * 0.5 + 0.5) * w, y: (-tmp.y * 0.5 + 0.5) * h };
     };
 
+    let gx = sideRef.current === "right" ? -2.4 : 2.4;
     const start = performance.now();
     const frame = () => {
       if (!visible) return;
@@ -281,8 +315,11 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
       camera.position.set(mouse.x * 4, target.y + 4.2 - mouse.y * 2, dist);
       camera.lookAt(target);
       // The glass sits a little left so the labels have room on the right
-      group.position.x = -2.4;
-      shadow.position.x = -2.4 + 0.9;
+      // It slides across when the labels switch sides
+      const right = sideRef.current === "right";
+      gx += ((right ? -2.4 : 2.4) - gx) * (reduce ? 1 : 0.08);
+      group.position.x = gx;
+      shadow.position.x = gx + 0.9;
       group.rotation.y = reduce ? 0 : Math.sin(t * 0.3) * 0.1;
 
       vessels.double.mesh.visible = state.vessel === "double";
@@ -301,12 +338,31 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
         m.rotation.y += reduce ? 0 : 0.002;
       });
 
+      const yTop = STREAM_TOP + (surface - STREAM_TOP) * state.tail;
+      const yBot = STREAM_TOP + (surface - STREAM_TOP) * state.head;
+      stream.visible = yTop - yBot > 0.02;
+      if (stream.visible) {
+        if (streamHex !== state.pourColor) {
+          streamHex = state.pourColor;
+          streamMat.color.set(streamHex);
+        }
+        // Foam is heavier and matte; liquids are a thin glossy rope that wavers a little
+        const r = state.pourFoam ? 0.3 : 0.15;
+        streamMat.roughness = state.pourFoam ? 0.85 : 0.12;
+        stream.position.set(0.45 + Math.sin(t * 2.3) * 0.04, yTop, 0.3);
+        stream.scale.set(r * (1 + Math.sin(t * 9) * 0.06), yTop - yBot, r);
+      }
+
       renderer.render(scene, camera);
 
       // Place labels
       let y0 = v.inner[0][0];
       // Labels line up in one column to the right of the glass
-      const col = w * 0.6;
+      const col = right ? w * 0.6 : w * 0.4;
+      // Thin layers sit close together, so each label's text keeps at least LABEL_GAP above the one below;
+      // the dot and leader stay on the layer itself.
+      const LABEL_GAP = 40;
+      let below = Infinity;
       labelEls.forEach((el, i) => {
         const top = state.h[i];
         if (!state.names[i] || top <= y0 + 0.05) {
@@ -314,17 +370,25 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
           return;
         }
         const mid = (y0 + top) / 2;
-        const p = project(radiusAt(v, mid) + 0.08, mid);
+        const p = project((radiusAt(v, mid) + 0.08) * (right ? 1 : -1), mid);
+        const textY = Math.min(p.y, below - LABEL_GAP);
+        below = textY;
+        (el.lastElementChild as HTMLElement).style.transform = `translateY(${textY - p.y}px)`;
         el.style.opacity = String(state.labels);
-        el.style.transform = `translate(${p.x}px, ${p.y - 3}px)`;
-        el.style.setProperty("--len", `${Math.max(14, col - p.x - 5)}px`);
+        // Mirrored on the left: text, leader, dot, with the dot at the glass
+        el.style.flexDirection = right ? "row" : "row-reverse";
+        const text = el.lastElementChild as HTMLElement;
+        text.style.margin = right ? "0 0 0 12px" : "0 12px 0 0";
+        text.style.textAlign = right ? "left" : "right";
+        el.style.transform = `translate(${p.x}px, ${p.y - 3}px)` + (right ? "" : " translateX(-100%)");
+        el.style.setProperty("--len", `${Math.max(14, right ? col - p.x - 5 : p.x - col - 5)}px`);
         (el.querySelector("[data-n]") as HTMLElement).textContent = state.names[i];
         (el.querySelector("[data-ml]") as HTMLElement).textContent = `${Math.round(state.ml[i])} ml`;
         y0 = top;
       });
       const ip = project(radiusAt(v, surface) + 1.4, surface + 1.2);
       iceLabel.style.opacity = String(tall ? state.ice * state.labels * 0.9 : 0);
-      iceLabel.style.transform = `translate(${col + 17}px, ${ip.y}px)`;
+      iceLabel.style.transform = right ? `translate(${col + 17}px, ${ip.y}px)` : `translate(${col - 17}px, ${ip.y}px) translateX(-100%)`;
     };
     gsap.ticker.add(frame);
 
@@ -333,19 +397,25 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
     let first = true;
     let current: Recipe | null = null;
     api.current = {
-      setRecipe(r: Recipe) {
-        if (r === current) return;
+      setRecipe(r: Recipe, fromEmpty = false) {
+        if (r === current && !fromEmpty) return;
         current = r;
         tl?.kill();
         const nextVessel = r.ice ? "highball" : "double";
         tl = gsap.timeline();
         const quick = reduce;
+        state.head = state.tail = 0;
         // GSAP treats arrays as lists of targets, so heights are driven through a 0→1 proxy instead.
         const drive = (dur: number, ease: string, apply: (k: number) => void) => {
           const o = { k: 0 };
           return gsap.to(o, { k: 1, duration: dur, ease, onUpdate: () => apply(o.k) });
         };
-        if (!first && !quick) {
+        if (fromEmpty) {
+          // A fresh glass: start empty, no drain
+          state.labels = state.ice = 0;
+          state.vessel = nextVessel;
+          state.swap = 1;
+        } else if (!first && !quick) {
           tl.to(state, { labels: 0, ice: 0, duration: 0.25 });
           let fromH: number[] = [];
           let fromMl: number[] = [];
@@ -378,25 +448,30 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
           const v = vessels[nextVessel].def;
           const targetH = heightFor(v, cum);
           const startH = i === 0 ? v.inner[0][0] : heightFor(v, cum - l.ml);
+          const layer = gsap.timeline().call(() => {
+            // Every layer above this one starts at this layer's floor
+            for (let k = i; k < 5; k++) state.h[k] = Math.max(state.h[k], startH);
+            state.pourColor = l.color;
+            state.pourFoam = !!l.foam;
+          });
+          // The first layer waits for the stream to fall into the glass
+          if (i === 0) layer.to(state, { head: 1, duration: quick ? 0 : 0.28, ease: "power2.in" });
           tl!.add(
-            gsap
-              .timeline()
-              .call(() => {
-                // Every layer above this one starts at this layer's floor
-                for (let k = i; k < 5; k++) state.h[k] = Math.max(state.h[k], startH);
-              })
+            layer
               .add(
                 drive(quick ? 0 : 0.8, "power2.out", (k) => {
                   state.h[i] = startH + (targetH - startH) * k;
                   for (let j = i + 1; j < 5; j++) state.h[j] = state.h[i];
                   state.ml[i] = l.ml * k;
                 }),
-                0,
+                i === 0 ? ">" : 0,
               ),
             // The first layer must start after the reset above; later ones overlap the previous pour.
             quick || i === 0 ? ">" : ">-0.3",
           );
         });
+        // The stream's tail falls in after it, then it's gone
+        tl.to(state, { tail: 1, duration: quick ? 0 : 0.25, ease: "power2.in" }).set(state, { head: 0, tail: 0 });
         if (r.ice) tl.to(state, { ice: 1, duration: quick ? 0 : 0.7, ease: "back.out(1.4)" });
         tl.to(state, { labels: 1, duration: quick ? 0 : 0.5 });
         first = false;
@@ -430,10 +505,16 @@ export default function Glass3D({ recipe, background = "#F3EEE5", accent = "#6E1
   }, [background, accent]);
 
   useEffect(() => {
+    sideRef.current = side;
+  }, [side]);
+
+  useEffect(() => {
     latest.current = recipe;
     // The scene effect pours the first recipe itself; this handles every change after that.
-    if (mounted.current) api.current?.setRecipe(recipe);
-  }, [recipe]);
+    const fresh = replay !== lastReplay.current;
+    lastReplay.current = replay;
+    if (mounted.current) api.current?.setRecipe(recipe, fresh);
+  }, [recipe, replay]);
 
   return (
     <div ref={wrap} className="relative h-full w-full">

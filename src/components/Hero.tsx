@@ -9,6 +9,17 @@ const latteTheme: LatteTheme = { table: "transparent", ceramic: [0.975, 0.965, 0
 export default function Hero() {
   const root = useRef<HTMLElement>(null);
   const cup = useRef<FluidLatteHandle>(null);
+  const cupBox = useRef<HTMLDivElement>(null);
+
+  // Slide the finished cup away and a fresh, empty one in; the pour starts as it arrives.
+  const pourAgain = () => {
+    if (prefersReducedMotion()) return cup.current?.pour();
+    gsap
+      .timeline()
+      .to(cupBox.current, { xPercent: 14, rotate: 8, autoAlpha: 0, duration: 0.45, ease: "power2.in" })
+      .add(() => cup.current?.pour())
+      .fromTo(cupBox.current, { xPercent: -14, rotate: -8 }, { xPercent: 0, rotate: 0, autoAlpha: 1, duration: 0.9, ease: "expo.out" });
+  };
 
   useGSAP(
     () => {
@@ -52,14 +63,14 @@ export default function Hero() {
 
       <figure className="order-1 md:order-2">
         {/* The cup sits straight on the page; the canvas bleeds past its box so the saucer shadow never clips */}
-        <div data-cup className="relative mx-auto aspect-square w-full max-w-[600px]">
+        <div ref={cupBox} data-cup className="relative mx-auto aspect-square w-full max-w-[600px]">
           <div className="absolute -inset-[14%]">
             <FluidLatte ref={cup} theme={latteTheme} size={0.215} />
           </div>
         </div>
         <figcaption data-in className="label relative mx-auto mt-2 flex max-w-[600px] items-center justify-between">
-          <span>Flat white. Move across it to stir.</span>
-          <button type="button" onClick={() => cup.current?.pour()} className="u-link text-ink/70 hover:text-ink">
+          <span>Flat white, poured for you. Move across it to stir.</span>
+          <button type="button" onClick={pourAgain} className="u-link text-ink/70 hover:text-ink">
             Pour again
           </button>
         </figcaption>
